@@ -1,0 +1,234 @@
+#Dependancies:
+#import tensorflow as tf
+import numpy as np
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # will only output errors from the log
+import tensorflow as tf
+import argparse
+
+#from tensorflow import keras
+from keras import models, layers, losses
+
+from util.print_progress import print_progress, showLossGraph
+from util.change_to_array import changeToArray
+from util.get_batches import createData, getBatches
+
+#parsing console arguments:
+"""
+p = ArgumentParser()
+p.add_argument('-n', '--name', required=True, help='name of file in "to_diagnose" to be diagnosed', type=str)
+arguments = p.parse_args()
+
+file_names = arguments.name.split(',') #parsing file names
+
+file_names = ['test1.jpg', 'test2.jpg'] #TEMPORARY
+"""
+class MissingTrainingDataError(Exception): #new error for missing training data
+    def __init__(self, arg):
+        self.strerror = arg
+
+if 'training images' not in os.listdir():
+    raise MissingTrainingDataError("Missing the 'training images' directory, please create it as a placeholder")
+
+#Import DATA
+data = createData()
+imageList = data['images']
+labelsList = data['labels']
+
+
+image_size = 128 #edit this to change size of images used
+
+#creating model
+model = models.Sequential()
+
+model.add(layers.Conv2D(image_size, (3, 3), activation='relu', input_shape=(image_size, image_size, 3)))
+model.add(layers.MaxPooling2D((2, 2)))
+model.add(layers.Conv2D(image_size * 2, (3, 3), activation='relu'))
+model.add(layers.MaxPooling2D((2, 2)))
+model.add(layers.Conv2D(image_size * 2, (3, 3), activation='relu'))
+model.add(layers.Flatten())
+model.add(layers.Dense(image_size * 2, activation='relu'))
+model.add(layers.Dense(1))
+
+#compiling and evaluating model
+model.compile(optimizer='adam',
+              loss = losses.BinaryCrossentropy(),
+              metrics=['accuracy'])
+
+
+train_images = [imageList[:round(0.75*(len(imageList)-1))]]
+train_labels = [labelsList[:round(0.75*(len(labelsList)-1))]]
+
+test_images = [imageList[round(0.75*(len(imageList)-1)):len(imageList)]]
+test_labels = [labelsList[round(0.75*(len(labelsList)-1)):len(labelsList)]]
+
+history = model.fit(train_images, train_labels, epochs=10, 
+                    validation_data=(test_images, test_labels))
+
+print("Optimization is done!")
+showLossGraph(history.history['loss'])
+
+redir = os.getcwd()
+os.chdir('./to_diagnose')
+n = 0
+
+for i in os.listdir():
+    if i != 'README.md':
+        cur_image_array = [changeToArray(i, n)]
+
+        if len(cur_image_array[0]) == image_size:
+            prediction = model.predict_classes([cur_image_array])
+
+            str_pred = "have pink eye" if prediction == 1 else "not have pink eye"
+            print("Image '{}' is predicted to {}".format(i, str_pred))
+
+        else:
+            print("Image '{}' is not an acceptable size".format(i))
+    
+    n += 1
+
+os.chdir(redir)
+--------------------
+
+import numpy as np
+from PIL import Image
+import os
+import matplotlib.image as mpimg
+
+def changeToArray(image, num):
+    ORIGINAL_DIR = os.getcwd()
+    resizeSize = 128
+    cdir = os.getcwd()
+    
+    pic = Image.open(cdir + "\\" + image)
+    new_width = resizeSize
+    new_height = resizeSize
+    pic = pic.resize((new_width, new_height), Image.ANTIALIAS)
+   
+    os.chdir(cdir + '\\..\\changed_images')
+
+    cdir = os.getcwd()
+
+    try:
+        pic.save(cdir + '\\' + str(num) + '.png')
+    
+    except OSError:
+        pic.save(cdir + '\\' + str(num) + '.jpg')
+    
+    finally:
+        try:
+            picArray = np.array(mpimg.imread(str(num) + '.png'))#convert to array
+        
+        except FileNotFoundError:
+            picArray = np.array(mpimg.imread(str(num) + '.jpg'))
+
+        os.chdir(ORIGINAL_DIR)
+
+        return picArray
+ --------------
+ 
+ import numpy as np
+
+def get_batch(image_list, batch_size):
+	#generator, yields next *batch_size* elements in the image_list
+	lower = 0
+	for i in image_list:
+		yield image_list[lower: lower + batch_size]
+		lower += batch_size
+ ---------------
+ 
+ import numpy as np
+import os
+from .change_to_array import changeToArray
+
+def createData(image_size=128):
+    print('Loading Data. . .', end='   ')
+    
+    originalPath = os.getcwd()
+    os.chdir(originalPath + '\\training images')
+
+    images = []
+    labels = []
+    not_suitable = 0
+    
+    #tries to create the directory, if it does not exist
+    try:
+        os.mkdir(originalPath + '\\changed_images')
+
+    except FileExistsError as e:
+        pass
+
+    array = os.listdir()
+    
+    os.chdir(originalPath + '\\training images')
+    
+    for image in range(len(array)):
+
+        try:
+            current = changeToArray(array[image], image)
+            
+            if len(current) == image_size:
+                images.append(current)
+                
+                if '_P_' in array[image]:
+                    labels.append(1)
+
+                elif '_NP_' in array[image]:
+                    labels.append(0)
+
+                else:
+                    not_suitable += 1
+                    images.pop()
+            
+            else:
+                not_suitable += 1
+
+        except (OSError, FileNotFoundError) as e:
+            not_suitable += 1
+
+    os.chdir(originalPath)
+
+    print('[DONE]')
+            
+    print('{} images accepted'.format(len(images)))
+    print('{} images were not suitable'.format(not_suitable))
+
+    return {"images":images, "labels": labels}
+
+def getBatches(imageArray, batch_size, input_size, output_size, image_size=128):
+    randomIndices = np.random.randint(len(imageArray), size=batch_size)
+    x = np.zeros((batch_size, image_size, input_size))
+    y = np.zeros((batch_size, output_size))
+
+    for i in range(batch_size):
+        currentIndex = randomIndices[i]
+        x[i] = imageArray[currentIndex]
+        y[i] = imageArray[currentIndex]
+
+    return x, y
+------------------------
+
+import matplotlib.pyplot as plot
+
+def print_progress(epoch, loss, accuracy, totalEpochs):
+    percentage = round(100 * (epoch / totalEpochs))
+    if epoch == 1:
+        print('================')
+    print(
+        "Epoch: {}, ".format(epoch) +
+        "Loss: {}, ".format(round(loss, 4)) +
+        "Accuracy: {}".format(round(accuracy, 4)) +
+        "\n{}% finished".format(percentage)
+        )
+    print('================')
+
+def showLossGraph(lossList, label='Loss'):
+    numEpochs = len(lossList)
+    xList = range(1, numEpochs + 1)
+    plot.scatter(xList, lossList)
+    plot.title('Loss as a function of epoch number')
+    plot.xlabel('Epoch Number')
+    plot.ylabel(label)
+    plot.show()
+---------------------
+https://github.com/lachibal2/diagnosing-pink-eye-with-CNNs
