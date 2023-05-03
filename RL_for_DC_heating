@@ -1,0 +1,697 @@
+"""
+This file includes all agent classes
+"""
+
+import os
+import logging
+from datetime import datetime, date
+from abc import ABC, abstractmethod
+
+import numpy as np
+from sinergym.envs import EplusEnv
+
+from hnp.hnp import HNP
+
+logging.getLogger().addHandler(logging.StreamHandler())
+logger = logging.getLogger()
+logger.setLevel("INFO")
+
+
+class Agent(ABC):
+    """
+    Parent Reinforcement Learning Agent Class
+    """
+
+    def __init__(
+        self,
+        env: EplusEnv,
+        config: dict,
+        results_dir: str = "training_results",
+        use_beobench: bool = False,
+    ) -> None:
+        """
+        Constructor for RL agent
+
+        :param env: Gym environment
+        :param config: Agent configuration
+        :param results_dir: Directory to save results
+        :param use_beobench: Enable beobench
+
+        :return: None
+        """
+        self.env = env
+        self.config = config
+        self.results_dir = results_dir
+        self.rewards = []
+        self.use_beobench = use_beobench
+
+    @abstractmethod
+    def train(self) -> None:
+        """
+        RL agent training
+        """
+
+    def save_results(self) -> None:
+        """
+        Saves training result
+        """
+
+        today = date.today()
+        day = today.strftime("%Y_%b_%d")
+        now = datetime.now()
+        time = now.strftime("%H_%M_%S")
+        base_dir = "root" if self.use_beobench else os.getcwd()
+        dir_name = f"/{base_dir}/{self.results_dir}/{day}/results_{time}"
+        os.makedirs(dir_name)
+
+        logging.info("Saving results...")
+
+        np.save(f"{dir_name}/{self.__class__.__name__}_rewards.npy", self.rewards)
+
+
+class RandomActionAgent(Agent):
+    """
+    Random Action Agent Class
+    """
+
+    def train(self) -> None:
+        """
+        Random Action agent training
+        """
+
+        self.env.reset()
+        episode_reward = 0
+        ep_n = 0
+        n_steps = 0
+        while ep_n <= self.config["num_episodes"]:
+            # Set value table to value of max action at that state
+
+            action = self.env.action_space.sample()
+            _, rew, done, _ = self.env.step(action)
+            episode_reward += rew
+
+            n_steps += 1
+            if n_steps == self.config["horizon"]:  # New episode
+                self.rewards.append(episode_reward)
+                logger.info("Episode %d --- Reward: %d", ep_n, episode_reward)
+
+                n_steps = 0
+                ep_n += 1
+                episode_reward = 0
+
+            if done:
+                self.env.reset()
+
+
+class FixedActionAgent(Agent):
+    """
+    Fixed Action Agent Class
+    """
+
+    def train(self) -> None:
+        """
+        Fixed Action agent training
+        """
+
+        self.env.reset()
+        episode_reward = 0
+        ep_n = 0
+        n_steps = 0
+        while ep_n <= self.config["num_episodes"]:
+            # Set value table to value of max action at that state
+
+            _, reward, done, _ = self.env.step(self.config["action_index"])
+            episode_reward += reward
+
+            n_steps += 1
+            if n_steps == self.config["horizon"]:  # New episode
+                self.rewards.append(episode_reward)
+                logger.info("Episode %d --- Reward: %d", ep_n, episode_reward)
+
+                n_steps = 0
+                ep_n += 1
+                episode_reward = 0
+
+            if done:
+                self.env.reset()
+
+
+class QLearningAgent(Agent):
+    """
+    Q-Learning Agent Class
+    """
+
+    def __init__(
+        self,
+        env: EplusEnv,
+        config: dict,
+        obs_mask: np.ndarray,
+        results_dir: str = "training_results",
+        use_beobench: bool = False,
+        use_hnp: bool = True,
+    ) -> None:
+        """
+        Constructor for Q-Learning agent
+
+        :param env: Gym environment
+        :param config: Agent configuration
+        :param obs_mask: Mask to categorize variables into slowly-changing continuous,
+         fast-changing continuous, and discrete variables
+        :param results_dir: Directory to save results
+        :param use_beobench: Enable Beobench
+        :param use_hnp: Enable HNP
+
+        :return: None
+        """
+        # 3 types --> slowly-changing cont, fast-changing cont, discrete observations
+        # actions --> always discrete
+        # ASSUMES DISCRETE ACTION SPACE
+        super().__init__(env, config, results_dir, use_beobench)
+
+        self.gamma = config["gamma"]
+        self.epsilon = config["initial_epsilon"]
+        self.epsilon_annealing = config["epsilon_annealing"]
+        self.learning_rate = config["learning_rate"]
+        self.learning_rate_annealing = config["learning_rate_annealing"]
+        self.use_hnp = use_hnp
+
+        # Indices of continuous vars
+        self.continuous_idx = np.where(obs_mask <= 1)[0]
+        # Indices of discrete vars
+        self.discrete_idx = np.where(obs_mask == 2)[0]
+        # Reorganized indices of vars: continuous, discrete
+        self.permutation_idx = np.hstack((self.continuous_idx, self.discrete_idx))
+
+        if type(config["num_tiles"]) is list:
+            self.n_tiles = np.array(config["num_tiles"])
+        else:
+            self.n_tiles = np.full(self.continuous_idx.shape, config["num_tiles"])
+
+        # The lower and upper bounds for continuous vars
+        self.cont_low = np.zeros(len(self.continuous_idx))
+        self.cont_high = np.ones(len(self.continuous_idx))
+
+        self.obs_space_shape = self.get_obs_shape()
+        self.act_space_shape = self.get_act_shape()
+        self.qtb = np.zeros((*self.obs_space_shape, self.act_space_shape))
+        self.vtb = np.zeros(self.obs_space_shape)
+
+        self.state_visitation = np.zeros(self.vtb.shape)
+        self.average_rewards = []
+
+        if self.use_hnp:
+            self.hnp = HNP(np.where(obs_mask == 0)[0])
+
+    def get_obs_shape(self) -> tuple:
+        """
+        Get the observation space shape 
+        
+        The state space for continuous variables are tile coded based on the number of tiles set
+        in the configuration file.
+
+        :return: Tuple of discretized observation space for continuous variables and the observation
+         space for discrete variables
+        """
+        tile_size = 1 / self.n_tiles
+        tile_coded_space = [
+            np.arange(0, 1 + tile_size[i], tile_size[i]) for i in self.continuous_idx
+        ]
+
+        return tuple(
+            list(list(len(tiles) for tiles in tile_coded_space))
+            + list(self.env.observation_space.high[self.discrete_idx])
+        )
+
+    def get_act_shape(self) -> int:
+        """
+        Get the action space shape
+
+        :return: Action space shape
+        """
+        return self.env.action_space.n
+
+    def choose_action(self, obs_index: np.ndarray, mode: str = "explore") -> int:
+        """
+        Get action following epsilon-greedy policy
+
+        :param obs_index: Observation index
+        :param mode: Training or evaluation
+
+        :return: Action
+        """
+        if mode == "explore":
+            if np.random.rand(1) < self.epsilon:
+                return self.env.action_space.sample()
+            return np.argmax(self.qtb[tuple(obs_index)])
+
+        if mode == "greedy":  # For evaluation purposes
+            return np.argmax(self.qtb[tuple(obs_index)])
+
+    def get_vtb_idx_from_obs(self, obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Get the value table index from observation
+
+        For continuous variables, first get the indices as floats, then round to integers and stack
+        them with discrete variable indices
+
+        :param obs: Observation
+
+        :return: Value table index and continuous variable indices as floats
+        """
+        obs = obs[self.permutation_idx]
+        cont_obs = obs[: len(self.continuous_idx)]
+
+        cont_obs_index_floats = (
+            (cont_obs - self.cont_low)
+            / (self.cont_high - self.cont_low)
+            * (np.array(self.vtb.shape[: len(self.cont_high)]) - 1)
+        )
+        cont_obs_index = np.round(cont_obs_index_floats)
+        obs_index = np.hstack((cont_obs_index, obs[len(self.continuous_idx) :])).astype(
+            int
+        )
+
+        return obs_index, cont_obs_index_floats
+
+    def get_next_value(self, obs: np.ndarray) -> tuple[float, np.ndarray]:
+        """
+        Computes the new state value
+
+        If not using HNP, the new state value is retrieved from the value table directly.
+        For HNP computation, refer to the get_next_value function in HNP class.
+
+        :param obs: Observation
+
+        :return: Next state value and value table index of observation
+        """
+        full_obs_index, cont_obs_index_floats = self.get_vtb_idx_from_obs(obs)
+        next_value = self.vtb[tuple(full_obs_index)]
+
+        if self.use_hnp:
+            next_value = self.hnp.get_next_value(
+                self.vtb, full_obs_index, cont_obs_index_floats
+            )
+
+        return next_value, full_obs_index
+
+    def train(self) -> None:
+        """
+        Q-Learning agent training
+
+        The training follows conventional Q-Learning update rule. If the episode length is less than
+        the total number of weather data points, then the environment would not reset by the end of
+        the episode. The environment only resets when all the weather data points have been used up.
+        """
+
+        # n people, outdoor temperature, indoor temperature
+        obs = self.env.reset()
+        prev_vtb_index, _ = self.get_vtb_idx_from_obs(obs)
+        episode_reward = 0
+        ep_n = 0
+        n_steps = 0
+        while ep_n < self.config["num_episodes"]:
+            action = self.choose_action(prev_vtb_index)
+            # Set value table to value of max action at that state
+            self.vtb = np.nanmax(self.qtb, -1)
+            obs, rew, done, _ = self.env.step(action)
+            episode_reward += rew
+            next_value, next_vtb_index = self.get_next_value(obs)
+
+            # Do Q learning update
+            prev_qtb_index = tuple([*prev_vtb_index, action])
+            self.state_visitation[prev_qtb_index[:-1]] += 1
+            curr_q = self.qtb[prev_qtb_index]
+            q_target = rew + self.gamma * next_value
+            self.qtb[prev_qtb_index] = curr_q + self.learning_rate * (q_target - curr_q)
+            n_steps += 1
+            prev_vtb_index = next_vtb_index
+            if n_steps == self.config["horizon"]:  # New episode
+                if ep_n % 10 == 0:
+                    logger.info(
+                        "Episode %d --- Reward: %d Average reward per timestep: %.2f",
+                        ep_n,
+                        episode_reward,
+                        (episode_reward / n_steps),
+                    )
+                avg_reward = episode_reward / n_steps
+                self.rewards.append(episode_reward)
+                self.average_rewards.append(avg_reward)
+
+                n_steps = 0
+                ep_n += 1
+                episode_reward = 0
+                self.epsilon = self.epsilon * self.epsilon_annealing
+                self.learning_rate = self.learning_rate * self.learning_rate_annealing
+            if done:
+                obs = self.env.reset()
+                prev_vtb_index, _ = self.get_vtb_idx_from_obs(obs)
+    
+    def save_results(self) -> None:
+        """
+        Saves training result and learned Q table
+        """
+
+        today = date.today()
+        day = today.strftime("%Y_%b_%d")
+        now = datetime.now()
+        time = now.strftime("%H_%M_%S")
+        base_dir = "root" if self.use_beobench else os.getcwd()
+        dir_name = f"/{base_dir}/{self.results_dir}/{day}/results_{time}"
+        os.makedirs(dir_name)
+
+        logging.info("Saving results...")
+
+        with_hnp = ""
+        if self.use_hnp:
+            with_hnp = "-HNP"
+
+        np.savez(
+            f"{dir_name}/{self.__class__.__name__}{with_hnp}_results.npz", 
+             qtb=self.qtb, 
+             rewards=self.rewards,
+        )
+ --------
+ 
+ """
+This file includes all environment related class and methods
+"""
+
+import gym
+import numpy as np
+
+from sinergym.utils.wrappers import NormalizeObservation, MultiObsWrapper
+from sinergym.utils.constants import (
+    RANGES_5ZONE,
+    RANGES_DATACENTER,
+    RANGES_WAREHOUSE,
+    RANGES_OFFICE,
+    RANGES_OFFICEGRID,
+    RANGES_SHOP
+)
+
+
+class ObservationWrapper(gym.ObservationWrapper):
+    """
+    Sinergym environment wrapper to modify observations
+    """
+
+    def __init__(self, env, obs_to_keep):
+        """
+        Constructor for observation wrapper
+
+        :param env: Sinergym environment
+        :param obs_to_keep: Indices of state variables that are used
+
+        :return: None
+        """
+        super().__init__(env)
+        self.env = env
+        if not obs_to_keep.any():
+            self.obs_to_keep = np.arange(4, env.observation_space.shape[0])
+        else:
+            self.obs_to_keep = np.add(np.array(obs_to_keep), 4)
+
+    def observation(self, observation):
+        """
+        Remove the unused state variables from observation
+
+        :param observation: Full observation
+
+        :return: Filtered observation
+        """
+        return observation[self.obs_to_keep]
+
+
+def create_env(env_config: dict = None) -> gym.Env:
+    """
+    Create sinergym environment
+
+    :param env_config: Configuration kwargs for sinergym. Currently, there is only a single key
+     in this dictionary, "name". This sets the name of the environment.
+
+    :return: A configured gym environment.
+    """
+
+    if not env_config:
+        env_config = {"name": "Eplus-5Zone-hot-discrete-v1"}
+
+    env = gym.make(env_config["name"])
+
+    # Taken from https://github.com/ugr-sail/sinergym/blob/main/scripts/DRL_battery.py
+    if "normalize" in env_config and env_config["normalize"] is True:
+        env_type = env_config["name"].split("-")[1]
+        if env_type == "datacenter":
+            ranges = RANGES_DATACENTER
+        elif env_type == "5Zone":
+            ranges = RANGES_5ZONE
+        elif env_type == "warehouse":
+            ranges = RANGES_WAREHOUSE
+        elif env_type == "office":
+            ranges = RANGES_OFFICE
+        elif env_type == "officegrid":
+            ranges = RANGES_OFFICEGRID
+        elif env_type == "shop":
+            ranges = RANGES_SHOP
+        else:
+            raise NameError(f"env_type {env_type} is not valid, check environment name")
+        env = NormalizeObservation(env, ranges=ranges)
+
+    if "multi_observation" in env_config and env_config["multi_observation"] is True:
+        env = MultiObsWrapper(env)
+
+    return env
+----------------------
+
+"""
+This file includes the class for HNP
+"""
+
+import numpy as np
+
+
+class HNP:
+    """
+    Class for HNP computation
+    """
+
+    def __init__(self, slow_continuous_idx) -> None:
+        """
+        Constructor for HNP object
+
+        :param slow_continuous_idx: Indices for slowly-changing continuous vars
+        :return: None
+        """
+        self.slow_continuous_idx = slow_continuous_idx
+
+        n_slow_cont = len(self.slow_continuous_idx)
+        if n_slow_cont > 0:
+            portion_index_matrix = np.vstack(
+                (np.zeros(n_slow_cont), np.ones(n_slow_cont))
+            ).T
+            self.all_portion_index_combos = np.array(
+                np.meshgrid(*portion_index_matrix), dtype=int
+            ).T.reshape(-1, n_slow_cont)
+
+    def get_next_value(self, vtb, full_obs_index, cont_obs_index_floats):
+        """
+        Computes the new state value of tiles using HNP
+
+        HNP is only applied to slowly-changing continuous variables. First compute the next state 
+        tile portions from the float indices, then compute the next state value using the tile
+        portions.
+
+        :param vtb: State value table
+        :param full_obs_index: Value table index of observation
+        :param cont_obs_index_floats: Continuous variable indices
+
+        :return: Next state value for continuous variables
+        """
+        if len(self.slow_continuous_idx) == 0:  # No HNP calculation needed
+            return vtb[tuple(full_obs_index)]
+        slow_cont_obs_index_floats = cont_obs_index_floats[
+            : len(self.slow_continuous_idx)
+        ]
+        slow_cont_obs_index_int_below = np.floor(slow_cont_obs_index_floats).astype(
+            np.int32
+        )
+        slow_cont_obs_index_int_above = np.ceil(slow_cont_obs_index_floats).astype(
+            np.int32
+        )
+
+        vtb_index_matrix = np.vstack(
+            (slow_cont_obs_index_int_below, slow_cont_obs_index_int_above)
+        ).T
+        all_vtb_index_combos = np.array(np.meshgrid(*vtb_index_matrix)).T.reshape(
+            -1, len(slow_cont_obs_index_int_above)
+        )
+
+        portion_below = slow_cont_obs_index_int_above - slow_cont_obs_index_floats
+        portion_above = 1 - portion_below
+        portion_matrix = np.vstack((portion_below, portion_above)).T
+
+        non_hnp_index = full_obs_index[len(self.slow_continuous_idx) :]
+        next_value = 0
+        for i, combo in enumerate(self.all_portion_index_combos):
+            portions = portion_matrix[np.arange(len(slow_cont_obs_index_floats)), combo]
+            value_from_vtb = vtb[
+                tuple(np.hstack((all_vtb_index_combos[i], non_hnp_index)).astype(int))
+            ]
+            next_value += np.prod(portions) * value_from_vtb
+
+        return next_value
+ --------------------------------
+ import sys
+import json
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def main(filenames: list[str]) -> None:
+    if len(filenames) > 2:
+        plot_diff(filenames[1:])
+    else:
+        if ".npz" in filenames[1]:
+            results = np.load(filenames[1])
+            agent_name = filenames[1].split("/")[-1].split("_")[0]
+            for f in results.files:
+                if "rewards" in f:
+                    plot_rewards(agent_name, results[f])
+                    break
+        elif ".npy" in filenames[1]:
+            filename = filenames[1].split("/")[-1]
+            agent_name = filename.split("_")[0]
+            rewards = np.load(filename)
+            plot_rewards(agent_name, rewards)
+        elif ".json" in filenames[1]:
+            plot_dqn(filenames[1])
+        else:
+            print("Unrecognized file extension")
+
+
+def plot_rewards(agent_name: str, rewards: np.ndarray) -> None:
+    f = plt.figure()
+    f.set_figwidth(16)
+    f.set_figheight(7)
+
+    plt.plot(rewards)
+    plt.xlabel("Episodes")
+    plt.ylabel("Episodic Rewards")
+    plt.title(f"{agent_name} Training Rewards")
+    # plt.show()
+    plt.savefig(f"{agent_name}_rewards.png")
+    plt.close()
+
+
+def plot_diff(filenames: list[str]) -> None:
+    filename_0 = filenames[0].split("/")[-1]
+    filename_1 = filenames[1].split("/")[-1]
+
+    agent_1 = filename_0.split("_")[0]
+    agent_2 = filename_1.split("_")[0]
+
+    rewards_1 = np.load(filename_0)
+    rewards_2 = np.load(filename_1)
+    rewards_diff = rewards_1 - rewards_2
+
+    f = plt.figure()
+    f.set_figwidth(16)
+    f.set_figheight(7)
+
+    plt.plot(rewards_diff)
+    plt.xlabel("Episodes")
+    plt.ylabel("Episodic Rewards Diff")
+    plt.title(f"{agent_1} vs {agent_2} Training Rewards Diff")
+    plt.rcParams["figure.figsize"] = (35,10)
+    # plt.show()
+    plt.savefig(f"{agent_1}_v_{agent_2}_rewards.png")
+    plt.close()
+
+
+def plot_dqn(filename: str) -> None:
+    with open(filename) as results_json:
+        results = json.load(results_json)
+    rewards = []
+    for iter in results:
+        rewards.extend(iter["sampler_results"]["hist_stats"]["episode_reward"])
+    episode_index = np.arange(0, len(rewards), 1, dtype=int)
+    plt.plot(episode_index, rewards)
+    plt.xlabel("Episodes")
+    plt.ylabel("Episodic Rewards")
+    plt.title("DQN Training Rewards")
+    # plt.show()
+    plt.savefig("dqn_rewards.png")
+    plt.close()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Missing data file")
+    else:
+        main(sys.argv)
+-------------------------------------------
+
+import numpy as np
+from beobench.experiment.provider import config
+
+from hnp.agents import QLearningAgent
+from hnp.environment import ObservationWrapper, create_env
+
+
+def main():
+    obs_to_keep = np.array(config["env"]["config"]["obs_to_keep"])
+    mask = np.array(config["env"]["config"]["mask"])
+
+    env = create_env(config["env"]["config"])
+    env = ObservationWrapper(env, obs_to_keep)
+
+    agent = QLearningAgent(
+        env, 
+        config["agent"]["config"],
+        mask,
+        results_dir=config["general"]["local_dir"],
+        use_beobench=True
+    )
+    agent.train()
+    agent.save_results()
+    env.close()
+
+if __name__ == "__main__":
+    main()
+-----------------------------------
+
+import yaml
+import sys
+
+import numpy as np
+
+from hnp.agents import QLearningAgent
+from hnp.environment import ObservationWrapper, create_env
+
+
+def main(config_path):
+    with open(config_path, "r") as conf_yml:
+        config = yaml.safe_load(conf_yml)
+
+    obs_to_keep = np.array(config["env"]["obs_to_keep"])
+    mask = np.array(config["env"]["mask"])
+
+    env = create_env(config["env"])
+    env = ObservationWrapper(env, obs_to_keep)
+
+    agent = QLearningAgent(
+        env, 
+        config["agent"],
+        mask,
+    )
+    agent.train()
+    agent.save_results()
+    env.close()
+
+if __name__ == "__main__":
+    main(sys.argv[1])
+ -------------------------------------
+ 
+ #https://github.com/VectorInstitute/HV-Ai-C/tree/main
+ 
+ 
