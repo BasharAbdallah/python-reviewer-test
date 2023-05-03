@@ -1,0 +1,1271 @@
+import numpy as np
+import pandas as pd
+from pandas_datareader import data, wb
+import yfinance as yf
+import datetime as dt
+from chart_studio import plotly
+from plotly.subplots import make_subplots
+import plotly.graph_objs as go
+from plotly.offline import init_notebook_mode, plot, iplot
+
+def get_ichimoku_plot():
+
+    # Range of Crypto
+
+    #def fetch_data():
+    ticker = ["ETH-USD"]
+
+    #start = pd.to_datetime('2020-01-01')
+    end = dt.datetime.now().date()
+    crypto_df = yf.download(ticker, period = "1y", group_by = 'ticker', threads = True, progress=False)[['Open','High','Low','Close']].dropna()
+    #return crypto_df
+    #fetch_data().tail()
+
+    index = pd.date_range(end, periods=26, freq='D')
+    columns = crypto_df.columns
+    dfna = pd.DataFrame(index=index, columns=columns)
+    crypto_df = pd.concat([crypto_df,dfna])
+
+    # Tenkan-sen (Conversion Line): (nine-period high + nine-period low)/2))
+    nine_period_high = crypto_df['High'].rolling(window= 9).max()
+    nine_period_low = crypto_df['Low'].rolling(window= 9).min()
+    crypto_df['tenkan_sen'] = (nine_period_high + nine_period_low) /2
+
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2))
+    period26_high = crypto_df['High'].rolling(window=26).max()
+    period26_low = crypto_df['Low'].rolling(window=26).min()
+    crypto_df['kijun_sen'] = (period26_high + period26_low) / 2
+
+    # The most current closing price plotted 26 time periods behind (optional)
+    crypto_df['chikou_span'] = crypto_df['Close'].shift(-26)
+
+    # Senkou Span A (Leading Span A): (Conversion Line + Base Line)/2))
+    crypto_df['senkou_span_a'] = ((crypto_df['tenkan_sen'] + crypto_df['kijun_sen']) / 2).shift(26)
+
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2))
+    period52_high = crypto_df['High'].rolling(window=52).max()
+    period52_low = crypto_df['Low'].rolling(window=52).min()
+    crypto_df['senkou_span_b'] = ((period52_high + period52_low) / 2).shift(26)
+
+    # Grab just the `date` and `close` from the IEX dataset
+    #ichimoku_signals_df = pd.DataFrame(crypto_df['Close'])
+    crypto_df.index.name = 'Date'
+
+    # Initialize the new `Signal1` column
+    crypto_df['Signal1'] = 0
+
+    # Generate the trading signal (1 or 0) to when the -----Conversion cross over the Base-----
+    # Note: Use 1 when Conversion is more than/crosses over the Base and 0 for when it is not/lower.
+    #Conversion
+    crypto_df['Signal1'] = np.where(
+        (crypto_df['tenkan_sen'].shift(1) <= crypto_df['kijun_sen'].shift(1)) & (crypto_df['tenkan_sen'] > crypto_df['kijun_sen']), 1, crypto_df['Signal1'])
+    #Base
+    crypto_df['Signal1'] = np.where(
+        (crypto_df['tenkan_sen'].shift(1) >= crypto_df['kijun_sen'].shift(1)) & (crypto_df['tenkan_sen'] < crypto_df['kijun_sen']), -1, crypto_df['Signal1'])
+
+
+    df_new = crypto_df[crypto_df['Signal1'] == 1.0][['Close']]
+
+    #declare figure
+
+    fig = go.Figure()
+
+    # Set up traces
+    fig.add_trace(go.Candlestick(x=crypto_df.index,
+                                open=crypto_df['Open'],
+                                high=crypto_df['High'],
+                                low=crypto_df['Low'],
+                                close=crypto_df['Close'], name = 'market data'))
+
+
+    fig.add_trace(go.Scatter(x=crypto_df.index, y= crypto_df['tenkan_sen'],line=dict(color='royalblue', width=.8), name = 'Conversion Line'))
+    fig.add_trace(go.Scatter(x=crypto_df.index, y= crypto_df['kijun_sen'],line=dict(color='darkorange', width=.8), name = 'Base Line'))
+    fig.add_trace(go.Scatter(x=crypto_df.index, y= crypto_df['senkou_span_a'],line=dict(color='green', width=.8), name = 'Leading A'))
+    fig.add_trace(go.Scatter(x=crypto_df.index, y= crypto_df['senkou_span_b'],line=dict(color='red', width=.8), name = 'Leading B'))
+    fig.add_trace(go.Scatter(x=crypto_df.index, y= crypto_df['chikou_span'],line=dict(color='black', width=.8), name = 'Lagging Span'))
+
+    # Visualize entry position relative to close price
+    fig.add_trace(go.Scatter(x= df_new.index, 
+                            y= df_new['Close'],
+                            marker_color='yellow', 
+                            mode="markers", 
+                            name = 'Entry', 
+                            marker=dict(showscale=True)))
+
+
+    #Show
+    fig.update_layout(height=900, title_text="Entry and Exit Points of Ichimoku Span A & B crossover Trading Strategy", legend=dict(
+    yanchor="top",
+    y=0.99,
+    xanchor="left",
+    x=0.01
+))
+
+    return fig
+    -------------------------------
+    import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+
+import matplotlib.pyplot as plt
+from matplotlib.pyplot import figure
+import plotly.graph_objs as go
+
+from alpha_vantage.timeseries import TimeSeries
+from alpha_vantage.cryptocurrencies import CryptoCurrencies
+
+def get_lstm_plot_data():
+
+    # ! Long short-term memory (LSTM) deep learning algorithm is a specialized architecture that can "memorize" patterns from historical sequences of data and extrapolate such patterns for future events. Here I try to use it to predict BTC & ETH's price. 
+
+    config = {
+        "alpha_vantage": {
+            "key": "your-API-key", # Claim your free API key here: https://www.alphavantage.co/support/#api-key
+            "symbol": "BTC",
+            "market": "USD",
+            "key_adjusted_close": "4b. close (USD)",
+        },
+        "data": {
+            "window_size": 20,
+            "train_split_size": 0.80,
+        },
+        "plots": {
+            "xticks_interval": 90, # show a date every 90 days
+            "color_actual": "#001f3f",
+            "color_train": "#3D9970",
+            "color_val": "#0074D9",
+            "color_pred_train": "#3D9970",
+            "color_pred_val": "#0074D9",
+            "color_pred_test": "#FF4136",
+        },
+        "model": {
+            "input_size": 1, # since we are only using 1 feature, close price
+            "num_lstm_layers": 2,
+            "lstm_size": 32,
+            "dropout": 0.2,
+        },
+        "training": {
+            "device": "cpu", # "cuda" or "cpu"
+            "batch_size": 64,
+            "num_epoch": 100,
+            "learning_rate": 0.01,
+            "scheduler_step_size": 40,
+        }
+    }
+
+    # ! We need historical stock price data to train our deep learning model
+    # ? We use the adjusted closing price here - as that is the "best practice"
+
+    def download_data(config):
+        cc = CryptoCurrencies(key=config["alpha_vantage"]["key"])
+        data, meta_data = cc.get_digital_currency_daily(symbol=config["alpha_vantage"]["symbol"], market=config["alpha_vantage"]["market"])
+
+        data_date = [date for date in data.keys()]
+        data_date.reverse()
+
+        data_close_price = [float(data[date][config["alpha_vantage"]["key_adjusted_close"]]) for date in data.keys()]
+        data_close_price.reverse()
+        data_close_price = np.array(data_close_price)
+
+        num_data_points = len(data_date)
+        display_date_range = "from " + data_date[0] + " to " + data_date[num_data_points-1]
+
+        return data_date, data_close_price, num_data_points, display_date_range
+
+    data_date, data_close_price, num_data_points, display_date_range = download_data(config)
+
+
+    # ! Data normalization can increase the accuracy of the model and help the "gradient descent algorithm"(LSTM algorithm) converge more quickly. 
+
+    class Normalizer():
+        def __init__(self):
+            self.mu = None
+            self.sd = None
+
+        def fit_transform(self, x):
+            self.mu = np.mean(x, axis=(0), keepdims=True)
+            self.sd = np.std(x, axis=(0), keepdims=True)
+            normalized_x = (x - self.mu)/self.sd
+            return normalized_x
+
+        def inverse_transform(self, x):
+            return (x*self.sd) + self.mu
+
+    scaler = Normalizer()
+    normalized_data_close_price = scaler.fit_transform(data_close_price)
+
+    # ! Predict the 21st day's close price based on the past 20 days' close price
+    # ? Why choose 20 days? 
+    # ? - When LSTM models are used in NLP, the number of words in a sentence typically ranges from 15 to 20 words
+    # ? - Gradient descent considerations: attempting to back-propagate across very long input sequences may result in vanishing gradients
+    # ? - Longer sequences tend to have much longer training times
+
+    def prepare_data_x(x, window_size): # windowing
+
+        n_row = x.shape[0] - window_size + 1
+        output = np.lib.stride_tricks.as_strided(x, shape=(n_row, window_size), strides=(x.strides[0], x.strides[0]))
+        return output[:-1], output[-1]
+
+
+    def prepare_data_y(x, window_size): # simple moving average
+
+        output = x[window_size:]
+        return output
+
+    data_x, data_x_unseen = prepare_data_x(normalized_data_close_price, window_size=config["data"]["window_size"])
+    data_y = prepare_data_y(normalized_data_close_price, window_size=config["data"]["window_size"])
+
+    split_index = int(data_y.shape[0]*config["data"]["train_split_size"])
+    data_x_train = data_x[:split_index]
+    data_x_val = data_x[split_index:]
+    data_y_train = data_y[:split_index]
+    data_y_val = data_y[split_index:]
+
+
+    # ! Implement the data loader functionality
+
+    class TimeSeriesDataset(Dataset):
+        def __init__(self, x, y):
+            x = np.expand_dims(x,
+                            2)  # in our case, we have only 1 feature, so we need to convert `x` into [batch, sequence, features] for LSTM
+            self.x = x.astype(np.float32)
+            self.y = y.astype(np.float32)
+
+        def __len__(self):
+            return len(self.x)
+
+        def __getitem__(self, idx):
+            return (self.x[idx], self.y[idx])
+
+
+    dataset_train = TimeSeriesDataset(data_x_train, data_y_train)
+    dataset_val = TimeSeriesDataset(data_x_val, data_y_val)
+
+    train_dataloader = DataLoader(dataset_train, batch_size=config["training"]["batch_size"], shuffle=True)
+    val_dataloader = DataLoader(dataset_val, batch_size=config["training"]["batch_size"], shuffle=True)
+
+    # ! Define 3 layers for our LSTM neural network & Randomly "dropout"/ignore some neurons during training to prevent overfitting
+    # ! 1) To map input values into a high dimensional feature space
+    # ! 2) To learn the data in sequence 
+    # ! 3) To produce the predicted value based on LSTM's output 
+
+    class LSTMModel(nn.Module):
+        def __init__(self, input_size=1, hidden_layer_size=32, num_layers=2, output_size=1, dropout=0.2):
+            super().__init__()
+            self.hidden_layer_size = hidden_layer_size
+
+            self.linear_1 = nn.Linear(input_size, hidden_layer_size)
+            self.relu = nn.ReLU()
+            self.lstm = nn.LSTM(hidden_layer_size, hidden_size=self.hidden_layer_size, num_layers=num_layers,
+                                batch_first=True)
+            self.dropout = nn.Dropout(dropout)
+            self.linear_2 = nn.Linear(num_layers * hidden_layer_size, output_size)
+
+            self.init_weights()
+
+        def init_weights(self):
+            for name, param in self.lstm.named_parameters():
+                if 'bias' in name:
+                    nn.init.constant_(param, 0.0)
+                elif 'weight_ih' in name:
+                    nn.init.kaiming_normal_(param)
+                elif 'weight_hh' in name:
+                    nn.init.orthogonal_(param)
+
+        def forward(self, x):
+            batchsize = x.shape[0]
+
+            # layer 1
+            x = self.linear_1(x)
+            x = self.relu(x)
+
+            # LSTM layer
+            lstm_out, (h_n, c_n) = self.lstm(x)
+
+            # reshape output from hidden cell into [batch, features] for `linear_2`
+            x = h_n.permute(1, 0, 2).reshape(batchsize, -1)
+
+            # layer 2
+            x = self.dropout(x)
+            predictions = self.linear_2(x)
+            return predictions[:, -1]
+
+    # ! Start the model training process
+
+    def run_epoch(dataloader, is_training=False):
+        epoch_loss = 0
+
+        if is_training:
+            model.train()
+        else:
+            model.eval()
+
+        for idx, (x, y) in enumerate(dataloader):
+            if is_training:
+                optimizer.zero_grad()
+
+            batchsize = x.shape[0]
+
+            x = x.to(config["training"]["device"])
+            y = y.to(config["training"]["device"])
+
+            out = model(x)
+            loss = criterion(out.contiguous(), y.contiguous())
+
+            if is_training:
+                loss.backward()
+                optimizer.step()
+
+            epoch_loss += (loss.detach().item() / batchsize)
+
+        lr = scheduler.get_last_lr()[0]
+
+        return epoch_loss, lr
+
+
+    train_dataloader = DataLoader(dataset_train, batch_size=config["training"]["batch_size"], shuffle=True)
+    val_dataloader = DataLoader(dataset_val, batch_size=config["training"]["batch_size"], shuffle=True)
+
+    model = LSTMModel(input_size=config["model"]["input_size"], hidden_layer_size=config["model"]["lstm_size"],
+                    num_layers=config["model"]["num_lstm_layers"], output_size=1, dropout=config["model"]["dropout"])
+    model = model.to(config["training"]["device"])
+
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=config["training"]["learning_rate"], betas=(0.9, 0.98), eps=1e-9)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=config["training"]["scheduler_step_size"], gamma=0.1)
+
+    for epoch in range(config["training"]["num_epoch"]):
+        loss_train, lr_train = run_epoch(train_dataloader, is_training=True)
+        loss_val, lr_val = run_epoch(val_dataloader)
+        scheduler.step()
+
+    # here we re-initialize dataloader so the data doesn't shuffled, so we can plot the values by date
+
+    train_dataloader = DataLoader(dataset_train, batch_size=config["training"]["batch_size"], shuffle=False)
+    val_dataloader = DataLoader(dataset_val, batch_size=config["training"]["batch_size"], shuffle=False)
+
+    # ! Load the model and start predicting ^^
+
+    model.eval()
+
+    # ! predict on the training data, to see how well the model managed to learn and memorize
+
+    predicted_train = np.array([])
+
+    for idx, (x, y) in enumerate(train_dataloader):
+        x = x.to(config["training"]["device"])
+        out = model(x)
+        out = out.cpu().detach().numpy()
+        predicted_train = np.concatenate((predicted_train, out))
+
+    # ! predict on the validation data, to see how the model does
+
+    predicted_val = np.array([])
+
+    for idx, (x, y) in enumerate(val_dataloader):
+        x = x.to(config["training"]["device"])
+        out = model(x)
+        out = out.cpu().detach().numpy()
+        predicted_val = np.concatenate((predicted_val, out))
+
+    # ! predict the closing price of the next trading day
+
+    model.eval()
+
+    x = torch.tensor(data_x_unseen).float().to(config["training"]["device"]).unsqueeze(0).unsqueeze(2) # this is the data type and shape required, [batch, sequence, feature]
+    prediction = model(x)
+    prediction = prediction.cpu().detach().numpy()
+
+    # ! prepare plots
+
+    plot_range = 10
+    to_plot_data_y_val = np.zeros(plot_range)
+    to_plot_data_y_val_pred = np.zeros(plot_range)
+    to_plot_data_y_test_pred = np.zeros(plot_range)
+
+    to_plot_data_y_val[:plot_range-1] = scaler.inverse_transform(data_y_val)[-plot_range+1:]
+    to_plot_data_y_val_pred[:plot_range-1] = scaler.inverse_transform(predicted_val)[-plot_range+1:]
+    to_plot_data_y_test_pred[plot_range-1] = scaler.inverse_transform(prediction)
+
+    to_plot_data_y_val = np.where(to_plot_data_y_val == 0, None, to_plot_data_y_val)
+    to_plot_data_y_val_pred = np.where(to_plot_data_y_val_pred == 0, None, to_plot_data_y_val_pred)
+    to_plot_data_y_test_pred = np.where(to_plot_data_y_test_pred == 0, None, to_plot_data_y_test_pred)
+
+    # ! plot
+
+    plot_date_test = data_date[-plot_range+1:]
+    plot_date_test.append("tomorrow")
+
+    fig = go.Figure()
+
+    # Set up traces
+    fig.add_trace(go.Scatter(x=plot_date_test, y= to_plot_data_y_val,line=dict(color='royalblue', width=.8), name = 'Actual prices'))
+    fig.add_trace(go.Scatter(x=plot_date_test, y= to_plot_data_y_val_pred,line=dict(color='darkorange', width=.8), name = 'Past predicted prices'))
+    fig.add_trace(go.Scatter(x=plot_date_test, y= to_plot_data_y_test_pred, mode='markers', marker_color='red', marker_symbol='diamond', name = 'Predicted price for next day'))
+    fig.update_xaxes(type='category')
+
+    #Show
+    fig.update_layout(autosize=True, title_text="Predicting the close price of the next trading day", legend=dict(
+    yanchor="top",
+    y=0.99,
+    xanchor="left",
+    x=0.01
+    ))
+
+    return fig
+    ----------------------------------
+    import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+
+import matplotlib.pyplot as plt
+from matplotlib.pyplot import figure
+import plotly.graph_objs as go
+import plotly.express as px
+
+from alpha_vantage.timeseries import TimeSeries
+from alpha_vantage.cryptocurrencies import CryptoCurrencies
+
+def get_lstm_plot_data():
+
+    # ! Long short-term memory (LSTM) deep learning algorithm is a specialized architecture that can "memorize" patterns from historical sequences of data and extrapolate such patterns for future events. Here I try to use it to predict BTC & ETH's price. 
+
+    config = {
+        "alpha_vantage": {
+            "key": "your-API-key", # Claim your free API key here: https://www.alphavantage.co/support/#api-key
+            "symbol": "ETH",
+            "market": "USD",
+            "key_adjusted_close": "4b. close (USD)",
+        },
+        "data": {
+            "window_size": 20,
+            "train_split_size": 0.80,
+        },
+        "plots": {
+            "xticks_interval": 90, # show a date every 90 days
+            "color_actual": "#001f3f",
+            "color_train": "#3D9970",
+            "color_val": "#0074D9",
+            "color_pred_train": "#3D9970",
+            "color_pred_val": "#0074D9",
+            "color_pred_test": "#FF4136",
+        },
+        "model": {
+            "input_size": 1, # since we are only using 1 feature, close price
+            "num_lstm_layers": 2,
+            "lstm_size": 32,
+            "dropout": 0.2,
+        },
+        "training": {
+            "device": "cpu", # "cuda" or "cpu"
+            "batch_size": 64,
+            "num_epoch": 100,
+            "learning_rate": 0.01,
+            "scheduler_step_size": 40,
+        }
+    }
+
+    # ! We need historical stock price data to train our deep learning model
+    # ? We use the adjusted closing price here - as that is the "best practice"
+
+    def download_data(config):
+        cc = CryptoCurrencies(key=config["alpha_vantage"]["key"])
+        data, meta_data = cc.get_digital_currency_daily(symbol=config["alpha_vantage"]["symbol"], market=config["alpha_vantage"]["market"])
+
+        data_date = [date for date in data.keys()]
+        data_date.reverse()
+
+        data_close_price = [float(data[date][config["alpha_vantage"]["key_adjusted_close"]]) for date in data.keys()]
+        data_close_price.reverse()
+        data_close_price = np.array(data_close_price)
+
+        num_data_points = len(data_date)
+        display_date_range = "from " + data_date[0] + " to " + data_date[num_data_points-1]
+
+        return data_date, data_close_price, num_data_points, display_date_range
+
+    data_date, data_close_price, num_data_points, display_date_range = download_data(config)
+
+
+    # ! Data normalization can increase the accuracy of the model and help the "gradient descent algorithm"(LSTM algorithm) converge more quickly. 
+
+    class Normalizer():
+        def __init__(self):
+            self.mu = None
+            self.sd = None
+
+        def fit_transform(self, x):
+            self.mu = np.mean(x, axis=(0), keepdims=True)
+            self.sd = np.std(x, axis=(0), keepdims=True)
+            normalized_x = (x - self.mu)/self.sd
+            return normalized_x
+
+        def inverse_transform(self, x):
+            return (x*self.sd) + self.mu
+
+    scaler = Normalizer()
+    normalized_data_close_price = scaler.fit_transform(data_close_price)
+
+    # ! Predict the 21st day's close price based on the past 20 days' close price
+    # ? Why choose 20 days? 
+    # ? - When LSTM models are used in NLP, the number of words in a sentence typically ranges from 15 to 20 words
+    # ? - Gradient descent considerations: attempting to back-propagate across very long input sequences may result in vanishing gradients
+    # ? - Longer sequences tend to have much longer training times
+
+    def prepare_data_x(x, window_size): # windowing
+
+        n_row = x.shape[0] - window_size + 1
+        output = np.lib.stride_tricks.as_strided(x, shape=(n_row, window_size), strides=(x.strides[0], x.strides[0]))
+        return output[:-1], output[-1]
+
+
+    def prepare_data_y(x, window_size): # simple moving average
+
+        output = x[window_size:]
+        return output
+
+    data_x, data_x_unseen = prepare_data_x(normalized_data_close_price, window_size=config["data"]["window_size"])
+    data_y = prepare_data_y(normalized_data_close_price, window_size=config["data"]["window_size"])
+
+    split_index = int(data_y.shape[0]*config["data"]["train_split_size"])
+    data_x_train = data_x[:split_index]
+    data_x_val = data_x[split_index:]
+    data_y_train = data_y[:split_index]
+    data_y_val = data_y[split_index:]
+
+
+    # ! Implement the data loader functionality
+
+    class TimeSeriesDataset(Dataset):
+        def __init__(self, x, y):
+            x = np.expand_dims(x,
+                            2)  # in our case, we have only 1 feature, so we need to convert `x` into [batch, sequence, features] for LSTM
+            self.x = x.astype(np.float32)
+            self.y = y.astype(np.float32)
+
+        def __len__(self):
+            return len(self.x)
+
+        def __getitem__(self, idx):
+            return (self.x[idx], self.y[idx])
+
+
+    dataset_train = TimeSeriesDataset(data_x_train, data_y_train)
+    dataset_val = TimeSeriesDataset(data_x_val, data_y_val)
+
+    train_dataloader = DataLoader(dataset_train, batch_size=config["training"]["batch_size"], shuffle=True)
+    val_dataloader = DataLoader(dataset_val, batch_size=config["training"]["batch_size"], shuffle=True)
+
+    # ! Define 3 layers for our LSTM neural network & Randomly "dropout"/ignore some neurons during training to prevent overfitting
+    # ! 1) To map input values into a high dimensional feature space
+    # ! 2) To learn the data in sequence 
+    # ! 3) To produce the predicted value based on LSTM's output 
+
+    class LSTMModel(nn.Module):
+        def __init__(self, input_size=1, hidden_layer_size=32, num_layers=2, output_size=1, dropout=0.2):
+            super().__init__()
+            self.hidden_layer_size = hidden_layer_size
+
+            self.linear_1 = nn.Linear(input_size, hidden_layer_size)
+            self.relu = nn.ReLU()
+            self.lstm = nn.LSTM(hidden_layer_size, hidden_size=self.hidden_layer_size, num_layers=num_layers,
+                                batch_first=True)
+            self.dropout = nn.Dropout(dropout)
+            self.linear_2 = nn.Linear(num_layers * hidden_layer_size, output_size)
+
+            self.init_weights()
+
+        def init_weights(self):
+            for name, param in self.lstm.named_parameters():
+                if 'bias' in name:
+                    nn.init.constant_(param, 0.0)
+                elif 'weight_ih' in name:
+                    nn.init.kaiming_normal_(param)
+                elif 'weight_hh' in name:
+                    nn.init.orthogonal_(param)
+
+        def forward(self, x):
+            batchsize = x.shape[0]
+
+            # layer 1
+            x = self.linear_1(x)
+            x = self.relu(x)
+
+            # LSTM layer
+            lstm_out, (h_n, c_n) = self.lstm(x)
+
+            # reshape output from hidden cell into [batch, features] for `linear_2`
+            x = h_n.permute(1, 0, 2).reshape(batchsize, -1)
+
+            # layer 2
+            x = self.dropout(x)
+            predictions = self.linear_2(x)
+            return predictions[:, -1]
+
+    # ! Start the model training process
+
+    def run_epoch(dataloader, is_training=False):
+        epoch_loss = 0
+
+        if is_training:
+            model.train()
+        else:
+            model.eval()
+
+        for idx, (x, y) in enumerate(dataloader):
+            if is_training:
+                optimizer.zero_grad()
+
+            batchsize = x.shape[0]
+
+            x = x.to(config["training"]["device"])
+            y = y.to(config["training"]["device"])
+
+            out = model(x)
+            loss = criterion(out.contiguous(), y.contiguous())
+
+            if is_training:
+                loss.backward()
+                optimizer.step()
+
+            epoch_loss += (loss.detach().item() / batchsize)
+
+        lr = scheduler.get_last_lr()[0]
+
+        return epoch_loss, lr
+
+
+    train_dataloader = DataLoader(dataset_train, batch_size=config["training"]["batch_size"], shuffle=True)
+    val_dataloader = DataLoader(dataset_val, batch_size=config["training"]["batch_size"], shuffle=True)
+
+    model = LSTMModel(input_size=config["model"]["input_size"], hidden_layer_size=config["model"]["lstm_size"],
+                    num_layers=config["model"]["num_lstm_layers"], output_size=1, dropout=config["model"]["dropout"])
+    model = model.to(config["training"]["device"])
+
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=config["training"]["learning_rate"], betas=(0.9, 0.98), eps=1e-9)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=config["training"]["scheduler_step_size"], gamma=0.1)
+
+    for epoch in range(config["training"]["num_epoch"]):
+        loss_train, lr_train = run_epoch(train_dataloader, is_training=True)
+        loss_val, lr_val = run_epoch(val_dataloader)
+        scheduler.step()
+
+    # here we re-initialize dataloader so the data doesn't shuffled, so we can plot the values by date
+
+    train_dataloader = DataLoader(dataset_train, batch_size=config["training"]["batch_size"], shuffle=False)
+    val_dataloader = DataLoader(dataset_val, batch_size=config["training"]["batch_size"], shuffle=False)
+
+    # ! Load the model and start predicting ^^
+
+    model.eval()
+
+    # ! predict on the training data, to see how well the model managed to learn and memorize
+
+    predicted_train = np.array([])
+
+    for idx, (x, y) in enumerate(train_dataloader):
+        x = x.to(config["training"]["device"])
+        out = model(x)
+        out = out.cpu().detach().numpy()
+        predicted_train = np.concatenate((predicted_train, out))
+
+    # ! predict on the validation data, to see how the model does
+
+    predicted_val = np.array([])
+
+    for idx, (x, y) in enumerate(val_dataloader):
+        x = x.to(config["training"]["device"])
+        out = model(x)
+        out = out.cpu().detach().numpy()
+        predicted_val = np.concatenate((predicted_val, out))
+
+    # ! predict the closing price of the next trading day
+
+    model.eval()
+
+    x = torch.tensor(data_x_unseen).float().to(config["training"]["device"]).unsqueeze(0).unsqueeze(2) # this is the data type and shape required, [batch, sequence, feature]
+    prediction = model(x)
+    prediction = prediction.cpu().detach().numpy()
+
+    # ! prepare plots
+
+    plot_range = 10
+    to_plot_data_y_val = np.zeros(plot_range)
+    to_plot_data_y_val_pred = np.zeros(plot_range)
+    to_plot_data_y_test_pred = np.zeros(plot_range)
+
+    to_plot_data_y_val[:plot_range-1] = scaler.inverse_transform(data_y_val)[-plot_range+1:]
+    to_plot_data_y_val_pred[:plot_range-1] = scaler.inverse_transform(predicted_val)[-plot_range+1:]
+    to_plot_data_y_test_pred[plot_range-1] = scaler.inverse_transform(prediction)
+
+    to_plot_data_y_val = np.where(to_plot_data_y_val == 0, None, to_plot_data_y_val)
+    to_plot_data_y_val_pred = np.where(to_plot_data_y_val_pred == 0, None, to_plot_data_y_val_pred)
+    to_plot_data_y_test_pred = np.where(to_plot_data_y_test_pred == 0, None, to_plot_data_y_test_pred)
+
+    # ! plot
+
+    plot_date_test = data_date[-plot_range+1:]
+    plot_date_test.append("tomorrow")
+    
+    fig = go.Figure()
+
+    # Set up traces
+    fig.add_trace(go.Scatter(x=plot_date_test, y= to_plot_data_y_val,line=dict(color='royalblue', width=.8), name = 'Actual prices'))
+    fig.add_trace(go.Scatter(x=plot_date_test, y= to_plot_data_y_val_pred,line=dict(color='darkorange', width=.8), name = 'Past predicted prices'))
+    fig.add_trace(go.Scatter(x=plot_date_test, y= to_plot_data_y_test_pred, mode='markers', marker_color='red', marker_symbol='diamond', name = 'Predicted price for next day'))
+    fig.update_xaxes(type='category')
+
+    #Show
+    fig.update_layout(autosize=True, title_text="Predicting the close price of the next trading day", legend=dict(
+    yanchor="top",
+    y=0.99,
+    xanchor="left",
+    x=0.01
+    ))
+
+    return fig
+    --------------------------------------
+    # Imports
+import streamlit as st
+import sys
+import websocket, json, pprint, numpy as np, time, datetime
+from datetime import datetime
+import pandas as pd
+import pytz, requests
+import yfinance as yf
+import plotly.graph_objs as go
+import plotly.express as px
+
+# Cufflinks
+import cufflinks as cf
+cf.set_config_file(theme='solar',sharing='public')
+
+# Helper functions
+def ticker_data(ticker, period, interval):
+    data = yf.Ticker(ticker).history(period=period, interval=interval)
+    return data
+
+# Cufflinks Quantfig helper function
+def create_quantfig(data, title, name):
+    quantfig = cf.QuantFig(data, title=title,legend='top',name=name, up_color="green", down_color="red")
+    quantfig.add_sma([10,20],width=2,color=['green','lightgreen'],legendgroup=True)
+    quantfig.add_bollinger_bands(periods=20,boll_std=2,colors=['magenta','grey'],fill=True)
+    quantfig.add_rsi(periods=20,color='java')
+    
+    return quantfig
+
+# Plot chart function to be called in streamlit_app.py
+def plot_chart():
+    eth_df = ticker_data("ETH-USD", "2d", "1m")
+    eth_df.reset_index(inplace=True)
+    eth_df.set_index("Datetime", inplace=True)
+    
+    eth_candles = create_quantfig(eth_df, "ETH-USD, 1m", "ETH")
+
+    fig = eth_candles.iplot(asFigure=True, title="ETH-USD, 1m")
+    fig.update_layout(height=500, width=750, title_text="ETH-USD Chart 1m")
+
+    st.plotly_chart(fig)
+
+# AEDT to EDT function used for accessing latest RSI from API
+# because the API json comes in EDT time
+def aedt_to_edt():
+    default_time = datetime.now()
+    edt_info = pytz.timezone("US/Eastern")
+    edt_time = default_time.astimezone(edt_info).strftime("%Y-%m-%d %H:%M")
+    return edt_time
+
+# Get latest rsi calls aedt_to_edt() and then accesses the latest RSI from the API json
+def get_latest_rsi():
+    # Spare API keys
+    # url = 'https://www.alphavantage.co/query?function=RSI&symbol=ETHUSD&interval=1min&time_period=14&series_type=close&apikey=HQ2OSP15VI0XOKJD'
+    # url = 'https://www.alphavantage.co/query?function=RSI&symbol=ETHUSD&interval=1min&time_period=14&series_type=close&apikey=R298VOBAB51H5V8O'
+    url = 'https://www.alphavantage.co/query?function=RSI&symbol=ETHUSD&interval=1min&time_period=14&series_type=close&apikey=HOSE4TMKXX8YTETD'
+    r = requests.get(url)
+    data = r.json()
+    time = aedt_to_edt()
+    rsi = data["Technical Analysis: RSI"][time]
+    return float(rsi["RSI"])
+
+# Gets called in streamlit_app.py and displays current ETHUSD price feed and current 1m RSI
+def get_rsi_price():
+# --------WebSocket---------
+    # st.empties for price feed
+    placeholder_price = st.empty()
+    placeholder_rsi = st.empty()
+    placeholder_rsi_sell = st.empty()
+    placeholder_rsi_buy = st.empty()
+
+    SOCKET = "wss://stream.binance.com:9443/ws/ethusdc@kline_1m"
+    closes = []
+    dates = []
+    rsi = []
+
+
+    RSI_PERIOD = 14
+    RSI_OVERBOUGHT =  70
+    RSI_OVERSOLD = 30
+    TRADE_SYMBOL = "ETHUSD"
+    TRADE_QUANTITY = 0.1
+
+    def on_open(wsapp):
+        print("opened connection")
+
+    def on_close(wsapp):
+        print("closed connection")
+
+    def on_message(wsapp, message):
+        json_message = json.loads(message)
+
+        # Naming variables
+        candle = json_message["k"]
+        is_candle_closed = candle["x"]
+        timestamp = candle["T"]
+        close = float(candle["c"])
+        close = round(close, 2)
+        if len(closes) >= 3:
+            placeholder_price.subheader(f"Second last price of ETHUSDC is {closes[-2]}\nLast price of ETHUSDC is {closes[-1]}\nCurrent price of ETHUSDC is {close}")
+        else: 
+            placeholder_price.subheader(f"Current price of ETHUSDC is {close}")
+        # RSI
+        rsi.append(get_latest_rsi())
+        placeholder_rsi.subheader(f"The current RSI is {rsi[-1]}")
+
+        # Signals
+        if rsi[-1] > RSI_OVERBOUGHT:
+            placeholder_rsi_sell.subheader(f"The current RSI is {rsi[-1]}, this is a SELL signal")
+        elif rsi[-1] < RSI_OVERSOLD:
+            placeholder_rsi_buy.subheader(f"The current RSI is {rsi[-1]}, this is a BUY signal")
+
+    wsapp = websocket.WebSocketApp(SOCKET, on_open=on_open, on_close=on_close, on_message=on_message)
+    wsapp.run_forever()
+
+
+------------------------
+from collections import namedtuple
+from pandas._libs.tslibs import timestamps
+import altair as alt
+import os 
+import math
+import pandas as pd
+import streamlit as st
+import numpy as np
+from bs4 import BeautifulSoup as BS
+import requests
+import urllib3
+import time
+import matplotlib.pyplot as plt
+import plotly.express as px
+import lstm_eth
+import lstm_btc
+import ichimoku
+import rsi
+from trading import PortfolioManager
+from alpaca_trade_api.rest import REST
+
+
+st.set_page_config(
+     page_title="Crypototo Roboto",
+     page_icon="🪄",
+     layout="centered",
+     initial_sidebar_state="collapsed",
+)
+
+# ! Trading Sidebar - Start 
+# TODO: Change the below key to your own API key or Please follow the README file to export keys 
+
+alpaca_api_key = os.getenv("APCA_API_KEY_ID")
+alpaca_secret_key = os.getenv("APCA_API_SECRET_KEY")
+request = requests.get("https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=ETH&to_currency=USD&apikey=R298VOBAB51H5V8O").json()
+eth_price = round(float(request['Realtime Currency Exchange Rate']['5. Exchange Rate']), 2)
+api = REST(alpaca_api_key, alpaca_secret_key, api_version='v2')
+manager = PortfolioManager()
+
+with st.sidebar.form(key ='execution form'):
+    title = st.title('💸 Execute Trade Now!')
+    my_account = st.header("Equity: $"+api.get_account().equity)
+    my_buying_power = st.subheader("Buying Power: $"+api.get_account().buying_power)
+    divider = st.markdown("---")
+    eth_icon = st.image("https://media.giphy.com/media/DdpmhAQpQZzwHSrQ3f/giphy.gif?cid=ecf05e477ppdd3d2qdsrijoe2u0mgeaw9y3pa95xigzoozkd&rid=giphy.gif&ct=s")
+    eth_price = st.metric(label="Current Price in $USD", value = eth_price)
+    eth_qty = st.number_input("Enter Quantity in ETH", value =0.10, min_value = 0.0, max_value = 10.0)    
+    eth_side = st.selectbox("Do you wish to buy or sell?", ("buy", "sell"))
+    submit = st.form_submit_button(label = 'Place Market Order Now ✅')
+
+    if submit: 
+        post_url = "https://paper-api.alpaca.markets/v2/orders"
+        post_json = {"symbol":"TSLA", "qty":eth_qty, "side":eth_side, "type":"market", "time_in_force":"day"}
+        post_header = {"APCA-API-KEY-ID":alpaca_api_key , "APCA-API-SECRET-KEY":alpaca_secret_key}
+        response = requests.post(post_url, json = post_json, headers= post_header)
+
+# ! Trading Sidebar - End
+
+st.markdown(
+"""
+<style>
+.wrapper {
+  height: 5vh;
+  /*This part is important for centering*/
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.typing-demo {
+  width: 22ch;
+  animation: typing 2s steps(22), blink 0.5s step-end infinite alternate;
+  white-space: nowrap;
+  overflow: hidden;
+  border-right: 3px solid;
+  font-family: monospace;
+  font-weight: bold;
+  font-size: 4em;
+}
+@keyframes typing {
+  from {
+    width: 0;
+  }
+}
+@keyframes blink {
+  50% {
+    border-color: transparent;
+  }
+}
+</style>
+<div class="wrapper">
+    <div class="typing-demo">
+      🪄 Crypototo Roboto
+    </div>
+</div>
+<br />
+<br />
+<a href="https://github.com/cleopatrick1/Project_2"><img src="https://img.shields.io/badge/GitHub-100000?style=for-the-badge&logo=github&logoColor=white" alt="github repo"></a>
+<br />
+<br />
+<b>A one-stop shop of all the key trading signals and technical indicators! 🛍</b>
+<br />
+Don't forget to check out the <code>sidebar</code> where you can send order to Alpaca instantly without needed to switch between browser tabs! 
+"""
+, unsafe_allow_html=True)
+
+"""
+---
+# 🎏 Ichimoku Cloud Trading Strategy
+[Ichimoku cloud](https://www.investopedia.com/terms/i/ichimoku-cloud.asp) is designed to spot direction and momentum in order to help you make buy and sell decisions more easily.
+\n Five indicators are used with each corresponding to a different timeline.
+"""
+st.write(ichimoku.get_ichimoku_plot())
+
+
+"""
+---
+# 👀 Watch Out for Whales! 
+Crypto market is not yet mature. Large players such as hedge funds and investment funds can use their advantage to manipulate the crypto price to their desired price to some extent, so it is important to always keep track of whale's movement and trade wisely!
+\n Price available in $USD - credit: [@whale-alert](https://whale-alert.io)
+"""
+
+response = requests.get('https://api.whale-alert.io/v1/transactions?api_key=zd1tXydtCfegKwzLvUIMPCAasDBMiCnk&currency=eth&limit=5').json()
+whale_data = response["transactions"]
+whale_df = pd.json_normalize(whale_data)
+whale_df["timestamp"] = pd.to_datetime(whale_df["timestamp"], unit='s').dt.time
+whale_df = whale_df[["timestamp", "amount_usd", "from.address", "from.owner"]]
+
+cols = st.columns(5)
+for whale in range(5):
+    amount_usd = whale_df.iloc[whale, 1]
+    timestamp = whale_df.iloc[whale, 0]
+    cols[whale].metric(label=str(timestamp), value="🐋", delta=amount_usd)
+
+"""
+---
+# 📈 Price Prediction with LSTM Machine Learning
+[Long short-term memory (LSTM)](https://en.wikipedia.org/wiki/Long_short-term_memory) deep learning algorithm is a specialized architecture that can "memorize" patterns from historical sequences of data and extrapolate such patterns for future events. 
+\n Here we try to use LSTM to predict ETH's closing price of the next trading day.
+"""
+st.write(lstm_eth.get_lstm_plot_data())
+st.markdown("**However, it is fair more accurate when it comes to BTC!** ")
+st.write(lstm_btc.get_lstm_plot_data())
+
+
+"""
+---
+# 💹 RSI Trading Strategy
+[RSI stands for Relative Strength Index](https://www.investopedia.com/terms/r/rsi.asp). It is a popular indicator for trading. When an assets RSI is below 30 it is considered oversold and a buy signal. When an assets RSI is above 70 it is considered overbought and a sell signal.
+\n Below you will see a price feed for ETHUSD and the current RSI, when it is either overbought or oversold a signal will appear.
+"""
+
+chart_container = st.container()
+price_container = st.container()
+with chart_container:
+    rsi.plot_chart()
+
+with price_container:
+    rsi.get_rsi_price()
+    -----------------------------------
+  import alpaca_trade_api as tradeapi
+import threading
+import time
+
+
+class PortfolioManager():
+    def __init__(self):
+        self.api = tradeapi.REST()
+
+        self.r_positions = {}
+
+    def format_percent(self, num):
+        if(str(num)[-1] == "%"):
+            return float(num[:-1]) / 100
+        else:
+            return float(num)
+
+    def clear_orders(self):
+        try:
+            self.api.cancel_all_orders()
+            print("All open orders cancelled.")
+        except Exception as e:
+            print(f"Error: {str(e)}")
+
+    def add_items(self, data):
+        ''' Expects a list of lists containing two items: symbol and position qty/pct
+        '''
+        for row in data:
+            self.r_positions[row[0]] = [row[1], 0]
+
+    def percent_rebalance(self, order_style, timeout=60):
+        print(f"Desired positions: ")
+        for sym in self.r_positions:
+            print(f"{sym} - {self.r_positions.get(sym)[0]} of portfolio.")
+        print()
+
+        positions = self.api.list_positions()
+        account = self.api.get_account()
+        portfolio_val = float(account.portfolio_value)
+        for sym in self.r_positions:
+            price = self.api.get_barset(sym, "minute", 1)[sym][0].c
+            self.r_positions[sym][0] = int(
+                self.format_percent(
+                    self.r_positions.get(sym)[0]) * portfolio_val / price)
+
+        print(f"Current positions: ")
+        for position in positions:
+            print(
+                f"{position.symbol} - {round(float(position.market_value) / portfolio_val * 100, 2)}% of portfolio.")
+        print()
+
+        self.clear_orders()
+
+        print("Clearing extraneous positions.")
+        for position in positions:
+            if(self.r_positions.get(position.symbol)):
+                self.r_positions.get(position.symbol)[1] = int(position.qty)
+            else:
+                self.send_basic_order(
+                    position.symbol, position.qty, ("buy", "sell")[
+                        position.side == "long"])
+        print()
+
+        if(order_style == "send"):
+            for sym in self.r_positions:
+                qty = self.r_positions.get(
+                    sym)[0] - self.r_positions.get(sym)[1]
+                self.send_basic_order(sym, qty, ("buy", "sell")[qty < 0])
+        elif(order_style == "timeout"):
+            threads = []
+            for i, sym in enumerate(self.r_positions):
+                qty = self.r_positions.get(
+                    sym)[0] - self.r_positions.get(sym)[1]
+                threads.append(
+                    threading.Thread(
+                        target=self.timeout_execution, args=(
+                            sym, qty, ("buy", "sell")[
+                                qty < 0], self.r_positions.get(sym)[0], timeout)))
+                threads[i].start()
+
+            for i in range(len(threads)):
+                threads[i].join()
+        elif(order_style == "block"):
+            threads = []
+            for i, sym in enumerate(self.r_positions):
+                qty = self.r_positions.get(
+                    sym)[0] - self.r_positions.get(sym)[1]
+                threads.append(
+                    threading.Thread(
+                        target=self.confirm_full_execution, args=(
+                            sym, qty, ("buy", "sell")[
+                                qty < 0], self.r_positions.get(sym)[0])))
+                threads[i].start()
+
+            for i in range(len(threads)):
+                threads[i].join()
+
+    def rebalance(self, order_style, timeout=60):
+        print(f"Desired positions: ")
+        for sym in self.r_positions:
+            print(f"{sym} - {self.r_positions.get(sym)[0]} shares.")
+        print("\n")
+
+        positions = self.api.list_positions()
+
+        print(f"Current positions: ")
+        for position in positions:
+            print(f"{position.symbol} - {position.qty} shares owned.")
+        print()
+
+        self.clear_orders()
+
+        print("Clearing extraneous positions.")
+        for position in positions:
+            if(self.r_positions.get(position.symbol)):
+                self.r_positions[position.symbol][1] = int(position.qty)
+            else:
+                self.send_basic_order(
+                    position.symbol, position.qty, ("buy", "sell")[
+                        position.side == "long"])
+        print()
+
+        if(order_style == "send"):
+            for sym in self.r_positions:
+                qty = int(self.r_positions.get(sym)[
+                          0]) - self.r_positions.get(sym)[1]
+                self.send_basic_order(sym, qty, ("buy", "sell")[qty < 0])
+        elif(order_style == "timeout"):
+            threads = []
+            for i, sym in enumerate(self.r_positions):
+                qty = int(self.r_positions.get(sym)[
+                          0]) - self.r_positions.get(sym)[1]
+                threads.append(
+                    threading.Thread(
+                        target=self.timeout_execution, args=(
+                            sym, qty, ("buy", "sell")[
+                                qty < 0], self.r_positions.get(sym)[0], timeout)))
+                threads[i].start()
+
+            for i in range(len(threads)):
+                threads[i].join()
+        elif(order_style == "block"):
+            threads = []
+            for i, sym in enumerate(self.r_positions):
+                qty = int(self.r_positions.get(sym)[
+                          0]) - self.r_positions.get(sym)[1]
+                threads.append(
+                    threading.Thread(
+                        target=self.confirm_full_execution, args=(
+                            sym, qty, ("buy", "sell")[
+                                qty < 0], self.r_positions.get(sym)[0])))
+                threads[i].start()
+
+            for i in range(len(threads)):
+                threads[i].join()
+
+    def send_basic_order(self, sym, qty, side):
+        qty = int(qty)
+        if(qty == 0):
+            return
+        q2 = 0
+        try:
+            position = self.api.get_position(sym)
+            curr_pos = int(position.qty)
+            if((curr_pos + qty > 0) != (curr_pos > 0)):
+                q2 = curr_pos
+                qty = curr_pos + qty
+        except BaseException:
+            pass
+        try:
+            if q2 != 0:
+                self.api.submit_order(sym, abs(q2), side, "market", "gtc")
+                try:
+                    self.api.submit_order(sym, abs(qty), side, "market", "gtc")
+                except Exception as e:
+                    print(
+                        f"Error: {str(e)}. Order of | {abs(qty) + abs(q2)} {sym} {side} | partially sent ({abs(q2)} shares sent).")
+                    return False
+            else:
+                self.api.submit_order(sym, abs(qty), side, "market", "gtc")
+            print(f"Order of | {abs(qty) + abs(q2)} {sym} {side} | submitted.")
+            return True
+        except Exception as e:
+            print(
+                f"Error: {str(e)}. Order of | {abs(qty) + abs(q2)} {sym} {side} | not sent.")
+            return False
+
+    def confirm_full_execution(self, sym, qty, side, expected_qty):
+        sent = self.send_basic_order(sym, qty, side)
+        if(not sent):
+            return
+
+        executed = False
+        while(not executed):
+            try:
+                position = self.api.get_position(sym)
+                if int(position.qty) == int(expected_qty):
+                    executed = True
+                else:
+                    print(f"Waiting on execution for {sym}...")
+                    time.sleep(20)
+            except BaseException:
+                print(f"Waiting on execution for {sym}...")
+                time.sleep(20)
+        print(
+            f"Order of | {abs(qty)} {sym} {side} | completed.  Position is now {expected_qty} {sym}.")
+
+    def timeout_execution(self, sym, qty, side, expected_qty, timeout):
+        sent = self.send_basic_order(sym, qty, side)
+        if(not sent):
+            return
+        output = []
+        executed = False
+        timer = threading.Thread(
+            target=self.set_timeout, args=(
+                timeout, output))
+        timer.start()
+        while(not executed):
+            if(len(output) == 0):
+                try:
+                    position = self.api.get_position(sym)
+                    if int(position.qty) == int(expected_qty):
+                        executed = True
+                    else:
+                        print(f"Waiting on execution for {sym}...")
+                        time.sleep(20)
+                except BaseException:
+                    print(f"Waiting on execution for {sym}...")
+                    time.sleep(20)
+            else:
+                timer.join()
+                try:
+                    position = self.api.get_position(sym)
+                    curr_qty = position.qty
+                except BaseException:
+                    curr_qty = 0
+                print(
+                    f"Process timeout at {timeout} seconds: order of | {abs(qty)} {sym} {side} | not completed. Position is currently {curr_qty} {sym}.")
+                return
+        print(
+            f"Order of | {abs(qty)} {sym} {side} | completed.  Position is now {expected_qty} {sym}.")
+
+    def set_timeout(self, timeout, output):
+        time.sleep(timeout)
+        output.append(True)
+      
+      -------------------
+     import requests
+import json
+import time
+import datetime
+import pandas as pd
+
+response = requests.get('https://api.whale-alert.io/v1/transactions?api_key=zd1tXydtCfegKwzLvUIMPCAasDBMiCnk&currency=eth&limit=5').json()
+whale_data = response["transactions"]
+whale_df = pd.json_normalize(whale_data)
+whale_df["timestamp"] = pd.to_datetime(whale_df["timestamp"], unit='s')
+
+print(whale_df["timestamp"])
