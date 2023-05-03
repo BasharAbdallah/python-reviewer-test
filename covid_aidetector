@@ -1,0 +1,463 @@
+from data.data import Data
+from analysis.analysis import Analysis
+from publish.file_saver import File_Saver
+
+
+class Data_Analysis_Pipeline:
+    def __init__(self):
+        self.data: Data or None = None
+        self.analysis: Analysis or None = None
+        self.file_saver: File_Saver or None = None
+
+    def calc_data(self):
+        self.data = Data()
+
+    def run_analysis(self):
+        self.analysis = Analysis(data=self.data)
+
+    def save_outputs_to_file(self):
+        self.file_saver = File_Saver(analysis=self.analysis)
+        ---------------------
+ from data_analysis_pipeline import Data_Analysis_Pipeline
+from pipeline_operations.pipeline_executor import Pipeline_Executor
+from config.data_analysis_config import Data_Analysis_Config
+
+SAVE_HISTORY = True
+SAVE_STATE = True
+JOB_KEY = 'corona_data_analysis'
+CONFIG = Data_Analysis_Config()
+
+if __name__ == '__main__':
+
+    pipeline = Data_Analysis_Pipeline()
+
+    steps = [
+        pipeline.calc_data,
+        pipeline.run_analysis,
+        pipeline.save_outputs_to_file
+    ]
+
+    pipeline_executor = Pipeline_Executor(pipeline_class=pipeline,
+                                          steps=steps,
+                                          save_history=SAVE_HISTORY,
+                                          save_state=SAVE_STATE,
+                                          pickle_path=Data_Analysis_Config.PICKLE_PATH,
+                                          job_key=JOB_KEY)
+    pipeline_executor.execute()
+-----------------------------------------------------
+
+from typing import List, Dict
+from collections import defaultdict
+
+from config.data_analysis_config import Data_Analysis_Config
+from data_classes.analysis_vector import Analysis_Vector
+
+from data_classes.data_fields import Data_Fields
+
+
+class Binary_Fields_Analysis:
+    def __init__(self, patients: List, vectors):
+        self.__patients = patients
+        self.__vectors: List[Analysis_Vector] = vectors
+        self.__report_tables: Dict = {}
+
+        self.__get_vectors_for_analysis()
+        self.__run_analysis()
+
+    def __run_analysis(self):
+        self.__calc_frequency_table()
+        self.__calc_binary_fields_by_target()
+
+    def __get_vectors_for_analysis(self):
+        data_fields_for_analysis = [Data_Fields.get_target()]
+        data_fields_for_analysis.extend(Data_Fields.get_binary_vars())
+
+        vectors_for_analysis = []
+        for vector in self.__vectors:
+            if vector.field_name in data_fields_for_analysis:
+                if vector.field_name in Data_Analysis_Config.DATA_FIELDS_IN_ANALYSIS:
+                    vectors_for_analysis.append(vector)
+
+        self.__vectors = vectors_for_analysis
+
+    def __calc_frequency_table(self):
+        report_dict = defaultdict(list)
+
+        for analysis_vector in self.__vectors:
+            clean_vector = analysis_vector.vector_without_missing_values
+            positive_percent = clean_vector.mean()
+            negative_percent = 1 - positive_percent
+
+            total_valid_patients = len(clean_vector)
+            positive_count = total_valid_patients * positive_percent
+            negative_count = total_valid_patients * negative_percent
+            missing_count = analysis_vector.get_missing_values_count
+
+            report_dict['data_field'].append(analysis_vector.field_name)
+            report_dict['positive_percent'].append(positive_percent)
+            report_dict['negative_percent'].append(negative_percent)
+            report_dict['positive_count'].append(positive_count)
+            report_dict['negative_count'].append(negative_count)
+            report_dict['missing_count'].append(missing_count)
+
+        self.__report_tables['binary_fields_frequency_table'] = report_dict
+
+    def __calc_binary_fields_by_target(self):
+        report_dict = defaultdict(list)
+        target_vector = self.__get_single_vector(Data_Fields.get_target())
+
+        for analysis_vector in self.__vectors:
+            if analysis_vector.field_name == Data_Fields.get_target():
+                continue
+
+            target_pos_feature_pos = 0
+            target_pos_feature_neg = 0
+            target_neg_feature_pos = 0
+            target_neg_feature_neg = 0
+            not_grouped = 0
+
+            for idx in range(len(analysis_vector.vector)):
+                feature_value = analysis_vector.vector[idx]
+                target_value = target_vector.vector[idx]
+
+                if feature_value is None or target_value is None:
+                    continue
+
+                elif target_value == 1 and feature_value == 1:
+                    target_pos_feature_pos += 1
+
+                elif target_value == 1 and feature_value == 0:
+                    target_pos_feature_neg += 1
+
+                elif target_value == 0 and feature_value == 1:
+                    target_neg_feature_pos += 1
+
+                elif target_value == 0 and feature_value == 0:
+                    target_neg_feature_neg += 1
+
+                else:
+                    not_grouped += 0
+
+            all_valid_tests = target_pos_feature_pos + target_pos_feature_neg + target_neg_feature_pos + target_neg_feature_neg
+
+            feature_pos_within_covid_positive_tests = target_pos_feature_pos / (target_pos_feature_pos + target_pos_feature_neg)
+            feature_pos_within_all_tests = (target_pos_feature_pos + target_neg_feature_pos) / all_valid_tests
+
+            report_dict['feature'].append(analysis_vector.field_name)
+            report_dict['feature positive within covid positive tests'].append(feature_pos_within_covid_positive_tests)
+            report_dict['feature positive within all tests'].append(feature_pos_within_all_tests)
+            report_dict['target positive feature positive'].append(target_pos_feature_pos)
+            report_dict['target positive feature negative'].append(target_pos_feature_neg)
+            report_dict['target negative feature positive'].append(target_neg_feature_pos)
+            report_dict['target negative feature negative'].append(target_neg_feature_neg)
+            report_dict['all valid tests'].append(all_valid_tests)
+
+        self.__report_tables['binary_fields_by_target_table'] = dict(report_dict)
+
+    def __get_single_vector(self, vector_name: str):
+        for analysis_vector in self.__vectors:
+            if analysis_vector.field_name == vector_name:
+                return analysis_vector
+
+    @property
+    def get_report_tables(self):
+        return self.__report_tables
+
+    # function for calculating binary unique values before one hot encoding
+
+    def __calc_binary_unique_values(self):
+        binary_data_fields = Data_Fields.get_binary_vars()
+        binary_vars_unique_values = defaultdict(set)
+        for patient in self.__patients:
+            for field in binary_data_fields:
+                value = getattr(patient, field)
+                binary_vars_unique_values[field].add(value)
+
+        self.__report_tables['binary_vars_unique_values'] = binary_vars_unique_values
+  ---------------------------------------------
+  from collections import defaultdict, Counter
+from typing import Dict, List
+
+from common_files.data_classes.data_fields import Data_Fields
+from common_files.data_classes.patient import Patient
+
+from config.data_analysis_config import Data_Analysis_Config as Config
+
+
+class continuous_data_fields_QA:
+    def __init__(self, patients: List[Patient]):
+        self.__patients = patients
+        self.__fields_in_qa: List[str] = Data_Fields.get_continuous_vars()
+        self.report_tables: Dict = {}
+
+        self.__calc()
+
+    def __calc(self):
+        self.__calc_QA()
+        self.__replace_un_accepted_vital_values_with_none()
+
+    def __calc_QA(self):
+        un_accepted_values_frequency = defaultdict(list)
+
+        for field_name in self.__fields_in_qa:
+            counter = Counter()
+
+            for patient in self.__patients:
+                vital_value = getattr(patient, field_name)
+                age_group = patient.age_group
+                lower_threshold, upper_threshold = self.__calc_thresholds(age_group, field_name)
+
+                if not vital_value:
+                    counter['missing_values_count'] += 1
+                elif vital_value > upper_threshold:
+                    counter['points_higher_than_higher'] += 1
+                elif vital_value < lower_threshold:
+                    counter['points_lower_than_lower'] += 1
+                else:
+                    counter['points_in_accepted_range'] += 1
+
+            missing_values_count = counter['missing_values_count']
+            valid_points = len(self.__patients) - missing_values_count
+            points_in_accepted_range = counter['points_in_accepted_range']
+            points_lower_than_lower = counter['points_lower_than_lower']
+            points_higher_than_higher = counter['points_higher_than_higher']
+
+            un_accepted_values_frequency['field_name'].append(field_name)
+            un_accepted_values_frequency['total_data_points'].append(len(self.__patients))
+            un_accepted_values_frequency['missing_values_count'].append(missing_values_count)
+            un_accepted_values_frequency['valid_points'].append(valid_points)
+            un_accepted_values_frequency['points_in_accepted_range'].append(points_in_accepted_range / valid_points)
+            un_accepted_values_frequency['points_lower_than_lower'].append(points_lower_than_lower / valid_points)
+            un_accepted_values_frequency['points_higher_than_higher'].append(points_higher_than_higher / valid_points)
+
+        self.report_tables['vitals_un_accepted_values_frequency'] = dict(un_accepted_values_frequency)
+
+    @staticmethod
+    def __calc_thresholds(age_group: str, field_name: str):
+        lower_threshold = Config.get_continuous_field_threshold(age_group=age_group,
+                                                                threshold='lower_threshold',
+                                                                vital_value_name=field_name)
+
+        upper_threshold = Config.get_continuous_field_threshold(age_group=age_group,
+                                                                threshold='upper_threshold',
+                                                                vital_value_name=field_name)
+
+        return lower_threshold, upper_threshold
+
+    def __replace_un_accepted_vital_values_with_none(self):
+        for patient in self.__patients:
+            age_group = patient.age_group
+
+            for field_name in self.__fields_in_qa:
+                vital_value = getattr(patient, field_name)
+
+                if vital_value is None:
+                    continue
+
+                lower_threshold = Config.get_continuous_field_threshold(age_group=age_group,
+                                                                        threshold='lower_threshold',
+                                                                        vital_value_name=field_name)
+
+                upper_threshold = Config.get_continuous_field_threshold(age_group=age_group,
+                                                                        threshold='upper_threshold',
+                                                                        vital_value_name=field_name)
+
+                if vital_value > upper_threshold or vital_value < lower_threshold:
+                    setattr(patient, field_name, None)
+---------------------------------
+
+import os
+import numpy as np
+from typing import List
+
+from data_operations.data_frame_printer import Data_Frame_Printer
+from analysis_operations.descriptive_table import Descriptive_Table
+from analysis_operations.graph_functions import histogram
+
+from config.data_analysis_config import Data_Analysis_Config
+
+
+class Age_Analysis:
+    def __init__(self, patients: List, publish_results: bool):
+        self.patients = patients
+        self.publish_results = publish_results
+        self.local_output_path = os.path.join(Data_Analysis_Config.OUTPUT_PATH, 'age_analysis')
+
+        self.continuous_vectors = None
+        self.categorical_vectors = None
+        self.age_descriptive_table = None
+
+        self.__generate_age_vectors()
+
+    def run_analysis(self):
+        self.age_descriptive_table = self.__age_descriptive_table()
+        self.__age_vector_histograms()
+
+        if self.publish_results:
+            self.__print_results()
+
+    def __print_results(self):
+        data_frame_printer = Data_Frame_Printer(path=self.local_output_path)
+        data_frame_printer.print_df_from_dict(self.age_descriptive_table, 'age_descriptive_table')
+
+    def __generate_age_vectors(self):
+        all_ages = np.array([patient.age for patient in self.patients])
+        adult_ages = np.array([patient.age for patient in self.patients if patient.is_adult == 1])
+        children_ages = np.array([patient.age for patient in self.patients if patient.is_adult == 0])
+
+        is_adult = np.array([patient.is_adult for patient in self.patients])
+        age_categorical = np.array([patient.age_category for patient in self.patients])
+
+        continuous_vectors = {'all_ages': all_ages, 'adult_ages': adult_ages, 'children_ages': children_ages}
+        categorical_vectors = {'is_adult': is_adult, 'age_categorical': age_categorical}
+
+        self.continuous_vectors = continuous_vectors
+        self.categorical_vectors = categorical_vectors
+
+    def __age_descriptive_table(self):
+        descriptive_table = Descriptive_Table(vector_dict=self.continuous_vectors).get_descriptive_table()
+        return descriptive_table
+
+    def __age_vector_histograms(self):
+        for vec in self.continuous_vectors:
+            histogram(vector=self.continuous_vectors[vec],
+                      label=vec,
+                      x_label='age',
+                      y_label='count',
+                      add_mean_line=True,
+                      path=self.local_output_path)
+
+    def __age_vector_bar_plots(self):
+        pass
+
+    def __age_cross_tab_with_covid(self):
+        pass
+    ------------------
+    
+    import numpy as np
+from collections import defaultdict
+from typing import List, Dict
+
+from analysis_operations.descriptive_table import Descriptive_Table
+from config.data_analysis_config import Data_Analysis_Config
+
+from data_classes.data_fields import Data_Fields
+from data_classes.patient import Patient
+
+
+class Missing_Values_Analysis:
+
+    def __init__(self, patients: List[Patient]):
+        self.__patients = patients
+        self.__report_tables: Dict = {}
+        self.__graph_vectors: Dict = {}
+
+        self.__run_analysis()
+
+    def __run_analysis(self):
+        self.__source_files_missing_values_analysis()
+        self.__data_field_missing_values_analysis()
+        self.__patient_missing_values_analysis()
+
+    @property
+    def get_report_tables(self):
+        return self.__report_tables
+
+    @property
+    def get_graph_vectors(self):
+        return self.__graph_vectors
+
+    def __source_files_missing_values_analysis(self):
+        total_data_points_counter = {}
+        missing_values_counter = {}
+
+        for patient in self.__patients:
+            source_file = patient.source_file
+
+            if source_file not in total_data_points_counter.keys():
+                total_data_points_counter[source_file] = 0
+                missing_values_counter[source_file] = 0
+
+            for idx in range(len(patient.__slots__)):
+                total_data_points_counter[source_file] += 1
+
+                value = getattr(patient, patient.__slots__[idx])
+                if value is None:
+                    missing_values_counter[source_file] += 1
+
+        report_dict = defaultdict(list)
+        total_data_points = 0
+        total_missing_values = 0
+
+        for source_file in total_data_points_counter:
+            source_file_total_data_points = total_data_points_counter[source_file]
+            source_file_missing_values_count = missing_values_counter[source_file]
+            missing_values_percent = source_file_missing_values_count / source_file_total_data_points
+
+            total_data_points += source_file_total_data_points
+            total_missing_values += source_file_missing_values_count
+
+            report_dict['source_file'].append(source_file)
+            report_dict['total_data_points'].append(source_file_total_data_points)
+            report_dict['missing_values_count'].append(source_file_missing_values_count)
+            report_dict['missing_values_percent'].append(missing_values_percent)
+
+        report_dict['source_file'].append('total')
+        report_dict['total_data_points'].append(total_data_points)
+        report_dict['missing_values_count'].append(total_missing_values)
+        report_dict['missing_values_percent'].append(total_missing_values / total_data_points)
+
+        self.__report_tables['source_files_missing_values_analysis'] = report_dict
+
+    def __data_field_missing_values_analysis(self):
+        missing_values_counter = dict(zip(Data_Fields.get_all_data_fields(),
+                                          np.linspace(start=0, stop=0, num=len(Data_Fields.get_all_data_fields()))))
+
+        for patient in self.__patients:
+            for data_field in Data_Fields.get_all_data_fields():
+                if getattr(patient, data_field) is None:
+                    missing_values_counter[data_field] += 1
+
+        total_patients = len(self.__patients)
+        report_dict = defaultdict(list)
+        for data_field in missing_values_counter:
+            null_count = missing_values_counter[data_field]
+            active_data_points_count = total_patients - missing_values_counter[data_field]
+            null_percent = missing_values_counter[data_field] / total_patients
+            active_data_points_percent = 1 - null_percent
+
+            report_dict['data_field'].append(data_field)
+            report_dict['missing_data_count'].append(null_count)
+            report_dict['active_data_count'].append(active_data_points_count)
+            report_dict['missing_data_percent'].append(null_percent)
+            report_dict['active_data_percent'].append(active_data_points_percent)
+
+        self.__report_tables['data_field_missing_values_analysis'] = report_dict
+
+    def __patient_missing_values_analysis(self):
+        missing_values_counter = defaultdict(int)
+
+        for patient in self.__patients:
+            for data_field in Data_Fields.get_all_data_fields():
+                if getattr(patient, data_field) is None:
+                    missing_values_counter[patient.id] += 1
+
+        patient_missing_values_vector = np.array([value for value in missing_values_counter.values()])
+        descriptive_table = Descriptive_Table({'patient_missing_values_vector': patient_missing_values_vector})
+
+        self.__report_tables['patient_missing_values_analysis'] = descriptive_table.get_descriptive_table()
+        self.__graph_vectors['patient_missing_values'] = patient_missing_values_vector
+
+    def __remove_data_fields_with_to_much_missing_values(self):
+        data_dict = self.__report_tables['data_field_missing_values_analysis']
+
+        for idx in range(len(data_dict['data_field'])):
+            data_field = data_dict['data_field']
+            missing_data_percent = data_dict['missing_data_percent']
+
+            if missing_data_percent > Data_Analysis_Config.DATA_FIELD_MISSING_VALUES_THRESHOLD:
+                Data_Analysis_Config.DATA_FIELDS_IN_ANALYSIS.remove(data_field)
+        -------------
+        
+        #https://github.com/noamfr/corona_classifier/tree/master
+        
